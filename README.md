@@ -319,6 +319,83 @@ Run with coverage:
 ```bash
 pytest --cov=app
 ```
+---
+
+# 🔧 Troubleshooting
+
+### Database Connection Issues
+
+**Error**
+
+```bash
+psycopg2.OperationalError: connection refused
+```
+
+**Cause**
+
+The API or worker container starts before PostgreSQL is fully initialized.
+
+**Fix**
+
+```bash
+docker compose restart api worker
+```
+
+---
+
+### Port 5432 Already in Use
+
+**Error**
+
+```bash
+failed to bind host port 0.0.0.0:5432/tcp: address already in use
+```
+
+**Cause**
+
+A local PostgreSQL instance is already running.
+
+**Fix**
+
+Use another host port in `docker-compose.yml`:
+
+```yaml
+ports:
+  - "5433:5432"
+```
+
+---
+
+### AI Model Deprecation Errors
+
+**Error**
+
+```bash
+400 Bad Request: model_decommissioned
+```
+
+**Cause**
+
+The configured LLM model is no longer supported.
+
+**Fix**
+
+Update the model configuration to the latest supported version:
+
+```python
+MODEL_NAME = "llama-3.1-8b-instant"
+```
+
+---
+
+### Reset Everything
+
+If you've changed configurations or the containers are in an inconsistent state:
+
+```bash
+docker compose down -v
+docker compose up -d --build
+```
 
 ---
 
