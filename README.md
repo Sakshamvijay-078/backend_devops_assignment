@@ -22,8 +22,8 @@ An asynchronous, event-driven backend system that ingests, cleans, and analyzes 
 - ⚡ **Asynchronous Processing** – Long-running tasks are executed by Celery workers, ensuring low API latency.
 - 🧠 **LLM-Powered Transaction Analysis** – Automatically categorizes transactions and generates financial narratives.
 - 📦 **Batch Processing Optimization** – Transactions are processed in batches to minimize LLM API calls and reduce costs.
-- 🔄 **Fault Tolerance & Retry Mechanism** – External API failures are handled using retry strategies and graceful fallbacks.
-- 📊 **Anomaly Detection** – Identifies unusual spending patterns and suspicious transactions.
+- 🔄 **Fault Tolerance & Retry Mechanism** – External API failures are handled with exponential backoff retries (max 3 attempts) and graceful fallbacks.
+- 📊 **Anomaly Detection** – Identifies unusual spending patterns using statistical rules (3× median threshold) and domestic-merchant/foreign-currency checks.
 - 🐳 **Containerized Deployment** – Entire infrastructure runs using Docker Compose for easy setup and deployment.
 - 🛡️ **Production-Oriented Design** – Built with scalability, maintainability, and resilience in mind.
 
@@ -38,10 +38,10 @@ An asynchronous, event-driven backend system that ingests, cleans, and analyzes 
 | Message Broker | Redis |
 | Database | PostgreSQL |
 | ORM | SQLAlchemy |
-| AI/LLM | Groq API (Llama-3.1-8B-Instant) |
+| AI/LLM | Groq API (llama-3.1-8b-instant) |
 | Containerization | Docker & Docker Compose |
 | Data Validation | Pydantic |
-| File Processing | Pandas |
+| File Processing | Python built-in `csv` + `python-dateutil` |
 
 ---
 
@@ -49,14 +49,12 @@ An asynchronous, event-driven backend system that ingests, cleans, and analyzes 
 
 ```bash
 .
-├── app/
-│   ├── api/
-│   ├── models/
-│   ├── schemas/
-│   ├── services/
-│   ├── workers/
-│   └── utils/
-├── uploads/
+├── main.py            # FastAPI application & API endpoints
+├── worker.py          # Celery task: data cleaning, anomaly detection, LLM calls
+├── database.py        # SQLAlchemy models & DB engine setup
+├── transactions.csv   # Sample CSV for testing
+├── uploads/           # Uploaded CSVs (shared Docker volume)
+├── assets/            # Diagrams and static assets
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
@@ -71,21 +69,21 @@ An asynchronous, event-driven backend system that ingests, cleans, and analyzes 
 ## 1️⃣ Clone the Repository
 
 ```bash
-git clone https://github.com/your-username/backend_assignment.git
-cd backend_assignment
+git clone https://github.com/Sakshamvijay-078/backend_devops_assignment.git
+cd backend_devops_assignment
 ```
 
 ---
 
 ## 2️⃣ Configure Environment Variables
 
-Create a `.env` file in the root directory:
+Create a `.env` file in the root directory. Only the Groq API key needs to be set — the database and Redis connection strings are pre-configured to match the Docker Compose services:
 
 ```env
-GROQ_API_KEY=your_groq_api_key
-DATABASE_URL=postgresql://postgres:postgres@db:5432/transactions
-REDIS_URL=redis://redis:6379/0
+GROQ_API_KEY=your_groq_api_key_here
 ```
+
+> **Note:** The PostgreSQL connection (`admin:password@db/transactions_db`) and Redis connection (`redis://redis:6379/0`) are already wired up internally via Docker Compose networking.
 
 ---
 
@@ -128,8 +126,9 @@ POST /jobs/upload
 
 **Request**
 
-```bash
-multipart/form-data
+```
+Content-Type: multipart/form-data
+Field: file  (must be a .csv file)
 ```
 
 **Response**
@@ -151,7 +150,16 @@ multipart/form-data
 GET /jobs/{job_id}/status
 ```
 
-**Response**
+**Response (while processing)**
+
+```json
+{
+  "job_id": "506e60fe-bd49-4f64-bc55-630251d4e4a4",
+  "status": "processing"
+}
+```
+
+**Response (when completed)**
 
 ```json
 {
@@ -180,12 +188,16 @@ GET /jobs/{job_id}/results
 ```json
 {
   "job_id": "506e60fe-bd49-4f64-bc55-630251d4e4a4",
-  "transactions": [],
+  "status": "completed",
   "summary": {
     "narrative": "Monthly expenses increased by 15% due to travel spending.",
     "risk_level": "medium",
-    "anomaly_count": 5
-  }
+    "anomaly_count": 5,
+    "total_spend_inr": 45200.0,
+    "total_spend_usd": 320.0,
+    "top_merchants": ["Swiggy", "Amazon", "IRCTC"]
+  },
+  "transactions": []
 }
 ```
 
@@ -193,27 +205,28 @@ GET /jobs/{job_id}/results
 
 # 🔄 Processing Workflow
 
-1. User uploads a CSV file.
-2. FastAPI creates a new processing job.
-3. Job metadata is stored in PostgreSQL.
-4. Task payload is pushed to Redis.
-5. Celery worker consumes the task.
-6. Transactions are cleaned and categorized.
-7. LLM generates summaries and insights.
-8. Results are stored in PostgreSQL.
-9. User polls the API to retrieve results.
+1. User uploads a CSV file via `POST /jobs/upload`.
+2. FastAPI saves the file to the shared Docker volume (`/app/uploads/`).
+3. A new `Job` record is created in PostgreSQL with status `pending`.
+4. A Celery task is dispatched to Redis (fire-and-forget).
+5. The Celery worker picks up the task and sets status to `processing`.
+6. **Data Cleaning** – Amounts are normalized, dates parsed to ISO 8601, duplicates removed by `txn_id`, and empty categories defaulted to `Uncategorised`.
+7. **Anomaly Detection** – Two rules applied: (a) amount exceeds 3× the account median, (b) domestic merchant (Swiggy, Ola, IRCTC) charged in USD.
+8. **LLM Batch Categorization** – All `Uncategorised` transactions are sent to Groq in a single batched prompt to minimize API calls.
+9. **LLM Narrative Summary** – Spending stats are sent to Groq to generate a narrative, risk level, and top merchants.
+10. Cleaned transactions and summary are saved to PostgreSQL; job status is set to `completed`.
+11. User polls `GET /jobs/{job_id}/status` or `GET /jobs/{job_id}/results` to retrieve output.
 
 ---
 
 # 🐳 Docker Services
 
-```yaml
-services:
-  - api
-  - worker
-  - postgres
-  - redis
-```
+| Service | Image / Build | Role |
+|---------|--------------|------|
+| `api` | Custom build | FastAPI server on port 8000 |
+| `worker` | Custom build | Celery background worker |
+| `db` | `postgres:15-alpine` | PostgreSQL database |
+| `redis` | `redis:7-alpine` | Message broker & result backend |
 
 Start:
 
@@ -231,6 +244,12 @@ View logs:
 
 ```bash
 docker compose logs -f
+```
+
+View logs for a specific service:
+
+```bash
+docker compose logs -f worker
 ```
 
 ---
@@ -269,13 +288,13 @@ Saving uploaded files on local Docker volumes causes disk I/O contention and sto
 
 **Problem**
 
-Single Redis instance becomes a bottleneck.
+Single Redis instance becomes a bottleneck under high load.
 
 **Solution**
 
 - Use Redis Cluster.
 - Deploy multiple Celery workers.
-- Introduce task prioritization.
+- Introduce task prioritization with separate queues.
 
 ---
 
@@ -289,36 +308,23 @@ Single FastAPI instance cannot handle large concurrent traffic.
 
 - Deploy multiple API replicas.
 - Use Nginx or a cloud load balancer.
-- Enable horizontal auto-scaling.
+- Enable horizontal auto-scaling (e.g., Kubernetes HPA).
 
 ---
 
 # 🛡️ Production Improvements
 
-- JWT Authentication
+- JWT Authentication & Authorization
 - Rate Limiting
-- Structured Logging
+- Structured Logging (e.g., structlog)
 - OpenTelemetry Tracing
 - Metrics with Prometheus & Grafana
 - CI/CD Pipeline with GitHub Actions
 - Kubernetes Deployment
 - Health Checks and Readiness Probes
-- Dead Letter Queue (DLQ)
-- Automated Backups
+- Dead Letter Queue (DLQ) for failed Celery tasks
+- Automated Database Backups
 
----
-
-# 🧪 Running Tests
-
-```bash
-pytest
-```
-
-Run with coverage:
-
-```bash
-pytest --cov=app
-```
 ---
 
 # 🔧 Troubleshooting
@@ -343,7 +349,7 @@ docker compose restart api worker
 
 ---
 
-### Port 5432 Already in Use
+### Port Already in Use
 
 **Error**
 
@@ -353,15 +359,15 @@ failed to bind host port 0.0.0.0:5432/tcp: address already in use
 
 **Cause**
 
-A local PostgreSQL instance is already running.
+A local PostgreSQL instance is already running on port 5432.
 
 **Fix**
 
-Use another host port in `docker-compose.yml`:
+The `docker-compose.yml` already maps PostgreSQL to host port `5433` to avoid this conflict. If `5433` is also taken, update it in `docker-compose.yml`:
 
 ```yaml
 ports:
-  - "5433:5432"
+  - "5434:5432"   # change left side to any free port
 ```
 
 ---
@@ -376,26 +382,40 @@ ports:
 
 **Cause**
 
-The configured LLM model is no longer supported.
+The configured LLM model is no longer supported by Groq.
 
 **Fix**
 
-Update the model configuration to the latest supported version:
+Update the model name in `worker.py` to the latest supported version:
 
 ```python
-MODEL_NAME = "llama-3.1-8b-instant"
+model="llama-3.1-8b-instant"
 ```
 
 ---
 
 ### Reset Everything
 
-If you've changed configurations or the containers are in an inconsistent state:
+If containers are in an inconsistent state:
 
 ```bash
 docker compose down -v
 docker compose up -d --build
 ```
+
+---
+
+# 📊 Sample CSV Format
+
+The pipeline expects a CSV with the following columns:
+
+```csv
+txn_id,date,merchant,amount,currency,status,category,account_id,notes
+TXN001,15-06-2024,Swiggy,450.00,INR,SUCCESS,,ACC001,Lunch order
+TXN002,2024/06/16,Amazon,1200.00,INR,SUCCESS,Shopping,ACC001,Books
+```
+
+A sample file (`transactions.csv`) is included in the repository for testing.
 
 ---
 
