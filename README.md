@@ -2,26 +2,20 @@
 
 An asynchronous, event-driven backend system that ingests, cleans, and analyzes financial transaction data. The system uses Large Language Models (LLMs) to categorize transactions, detect anomalies, and generate structured financial summaries while keeping the API responsive through background processing.
 
----
-
 # 🏗️ System Architecture
 
-```mermaid
-graph TD
-    Client([Client / API Consumer]) -->|1. Upload CSV| API(FastAPI Server)
-    API -->|2. Save Pending Job| DB[(PostgreSQL)]
-    API -->|3. Enqueue Task| Redis[(Redis Message Broker)]
-    API -->|4. Return job_id Immediately| Client
+<div align="center">
+  <img src="./assets/Pipeline_diagram.png"
+       alt="AI Transaction Processing Architecture"
+       width="1000">
+</div>
 
-    Worker(Celery Background Worker) <-->|5. Consume Task| Redis
-    Worker -->|6. Classify & Summarize Transactions| LLM(Groq API - Llama 3.1)
-    Worker -->|7. Store Results| DB
-
-    Client -->|8. Check Status / Fetch Results| API
-    API <-->|9. Read Processed Data| DB
-```
-
----
+<p align="center">
+  <em>
+  Asynchronous, event-driven pipeline for processing financial transactions
+  using FastAPI, Celery, Redis, PostgreSQL, and Groq LLM.
+  </em>
+</p>
 
 # ✨ Features
 
